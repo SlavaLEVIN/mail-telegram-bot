@@ -52,15 +52,19 @@ def digest(messages: list[StoredMessage], title: str, timezone) -> list[str]:
         return [f"<b>{escape(title)}</b>\n\nПисем за этот период нет."]
 
     chunks: list[str] = []
-    current = f"<b>{escape(title)}</b>\nВсего писем: {len(messages)}\n\n"
+    current = f"<b>{escape(title)}</b>\nВсего: {len(messages)} · по убыванию важности\n\n"
     for index, item in enumerate(messages, 1):
         received = item.received_at.astimezone(timezone)
         label = CATEGORY_LABELS.get(item.category, "✉️ Другое")
+        summary = item.summary.strip()
+        if summary.casefold() == item.subject.strip().casefold():
+            summary = "Краткое описание пока совпадает с темой."
+        if len(summary) > 500:
+            summary = summary[:497].rstrip() + "…"
         block = (
             f"<b>{index}. {escape(item.subject)}</b>\n"
             f"{label} · {item.importance}/100 · {received:%d.%m %H:%M}\n"
-            f"{escape(item.account_email)} · {escape(item.sender)}\n"
-            f"{escape(item.summary)}\n\n"
+            f"{escape(summary)}\n\n"
         )
         if len(current) + len(block) > 3900:
             chunks.append(current.rstrip())

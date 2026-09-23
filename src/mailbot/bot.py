@@ -10,10 +10,11 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from mailbot.config import Settings
 from mailbot.database import Database
 from mailbot.models import Account, StoredMessage
-from mailbot.presentation import CATEGORY_LABELS, message_card
+from mailbot.presentation import CATEGORY_LABELS, digest, message_card
 
 
 PAGE_SIZE = 6
+DIGEST_PERIODS = (6, 12, 24, 72, 168)
 CATEGORY_BUTTONS = (
     ("💼 Работа", "work"),
     ("🎓 Учёба", "study"),
@@ -40,7 +41,24 @@ def main_menu() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="📊 Статус", callback_data="status"),
                 InlineKeyboardButton(text="📮 Аккаунт", callback_data="accounts"),
             ],
+            [InlineKeyboardButton(text="⏰ Автосводка", callback_data="digestcfg")],
         ]
+    )
+
+
+def parse_digest_time(value: str) -> str:
+    parts = value.strip().split(":")
+    if len(parts) != 2 or not all(part.isdigit() for part in parts):
+        raise ValueError("Время нужно написать в формате ЧЧ:ММ, например 08:35")
+    hour, minute = (int(part) for part in parts)
+    if hour not in range(24) or minute not in range(60):
+        raise ValueError("Укажите реальное время от 00:00 до 23:59")
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _period_label(hours: int) -> str:
+    return {6: "6 часов", 12: "12 часов", 24: "24 часа", 72: "3 дня", 168: "7 дней"}.get(
+        hours, f"{hours} ч."
     )
 
 
@@ -85,6 +103,7 @@ class BotHandlers:
         self.router.message.register(self.digest_command, Command("digest"))
         self.router.message.register(self.status_command, Command("status"))
         self.router.message.register(self.accounts_command, Command("accounts"))
+        self.router.message.register(self.text_input, F.text)
         self.router.callback_query.register(self.callback, F.data)
 
     def authorized(self, user_id: int | None) -> bool:
@@ -132,6 +151,36 @@ class BotHandlers:
             await self._edit(query, await self._status_text(), self._back_menu())
         elif data == "accounts":
             await self._edit(query, self._accounts_text(), self._back_menu())
+        elif data == "digestcfg":
+            await self._show_digest_settings(query)
+        elif data == "dgnow":
+            _, hours, _ = await self._digest_settings()
+            if query.message:
+                await self.send_digest(query.bot, query.message.chat.id, hours)
+        elif data == "dgtoggle":
+            enabled, _, _ = await self._digest_settings()
+            await self.database.set_app_state("digest_enabled", "0" if enabled else "1")
+            await self._show_digest_settings(query)
+        elif data.startswith("dgperiod:"):
+            hours = int(data.split(":", 1)[1])
+            if hours in DIGEST_PERIODS:
+                await self.database.set_app_state("digest_hours", str(hours))
+            await self._show_digest_settings(query)
+        elif data.startswith("dgtime:"):
+            clock = parse_digest_time(data.split(":", 1)[1])
+            await self.database.set_app_state("digest_time", clock)
+            await self._show_digest_settings(query)
+        elif data == "dgcustom":
+            if query.message:
+                await self.database.set_app_state("digest_time_input", "1")
+                await self.database.set_app_state("digest_panel_message_id", str(query.message.message_id))
+                await self._edit(
+                    query,
+                    "<b>Точное время автосводки</b>\n\nОтправьте время одним сообщением в формате <code>ЧЧ:ММ</code>, например <code>08:35</code>.",
+                    InlineKeyboardMarkup(
+                        inline_keyboard=[[InlineKeyboardButton(text="Отмена", callback_data="digestcfg")]]
+                    ),
+                )
         elif data.startswith("list:"):
             _, scope, hours, page = data.split(":")
             await self._show_list(query, scope, int(hours), int(page))
@@ -152,8 +201,51 @@ class BotHandlers:
             await self._show_message(query, int(message_id), "all", 24, 0, "Важность сохранена")
 
     async def send_digest(self, bot: Bot, chat_id: int, hours: int) -> None:
-        text, keyboard = await self._list_payload("all", hours, 0)
-        await bot.send_message(chat_id, text, reply_markup=keyboard)
+        since = datetime.now(UTC) - timedelta(hours=hours)
+        messages = await self.database.recent_messages(since.isoformat(), limit=10_000)
+        chunks = digest(messages, f"Сводка за {_period_label(hours)}", self.settings.timezone)
+        for index, text in enumerate(chunks):
+            keyboard = None
+            if index == len(chunks) - 1:
+                keyboard = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="📬 Открыть письма", callback_data=f"list:all:{hours}:0")],
+                        [InlineKeyboardButton(text="⚙️ Настроить автосводку", callback_data="digestcfg")],
+                    ]
+                )
+            await bot.send_message(chat_id, text, reply_markup=keyboard)
+
+    async def text_input(self, message: Message) -> None:
+        if not self.authorized(message.from_user.id if message.from_user else None):
+            return
+        if await self.database.get_app_state("digest_time_input") != "1":
+            return
+        try:
+            clock = parse_digest_time(message.text or "")
+        except ValueError as exc:
+            await message.answer(f"⚠️ {escape(str(exc))}")
+            return
+
+        await self.database.set_app_state("digest_time", clock)
+        await self.database.set_app_state("digest_time_input", "0")
+        panel_id = await self.database.get_app_state("digest_panel_message_id")
+        try:
+            await message.delete()
+        except TelegramBadRequest:
+            pass
+        text, keyboard = await self._digest_payload()
+        if panel_id:
+            try:
+                await message.bot.edit_message_text(
+                    text=text,
+                    chat_id=message.chat.id,
+                    message_id=int(panel_id),
+                    reply_markup=keyboard,
+                )
+                return
+            except TelegramBadRequest:
+                pass
+        await message.answer(text, reply_markup=keyboard)
 
     async def _show_list(self, query: CallbackQuery, scope: str, hours: int, page: int) -> None:
         text, keyboard = await self._list_payload(scope, hours, page)
@@ -220,6 +312,63 @@ class BotHandlers:
             ])
         rows.append([InlineKeyboardButton(text="⌂ Главное меню", callback_data="menu")])
         await self._edit(query, "<b>Категории</b>\n\nВыберите категорию писем:", InlineKeyboardMarkup(inline_keyboard=rows))
+
+    async def _digest_settings(self) -> tuple[bool, int, str]:
+        enabled = (await self.database.get_app_state("digest_enabled") or "1") == "1"
+        raw_hours = await self.database.get_app_state("digest_hours") or "24"
+        hours = int(raw_hours) if raw_hours.isdigit() and int(raw_hours) in DIGEST_PERIODS else 24
+        default_time = self.settings.digest_time.strftime("%H:%M")
+        raw_time = await self.database.get_app_state("digest_time") or default_time
+        try:
+            clock = parse_digest_time(raw_time)
+        except ValueError:
+            clock = default_time
+        return enabled, hours, clock
+
+    async def _digest_payload(self) -> tuple[str, InlineKeyboardMarkup]:
+        enabled, hours, clock = await self._digest_settings()
+        status = "включена" if enabled else "выключена"
+        text = (
+            "<b>Автоматическая сводка</b>\n\n"
+            f"Статус: <b>{status}</b>\n"
+            f"Период: <b>{_period_label(hours)}</b>\n"
+            f"Отправка: <b>{clock}</b> ({escape(str(self.settings.timezone))})\n\n"
+            "В сводке будут все письма за период, отсортированные по важности, и краткое описание каждого."
+        )
+        period_rows = [
+            [
+                InlineKeyboardButton(
+                    text=("✓ " if value == hours else "") + _period_label(value),
+                    callback_data=f"dgperiod:{value}",
+                )
+                for value in DIGEST_PERIODS[:3]
+            ],
+            [
+                InlineKeyboardButton(
+                    text=("✓ " if value == hours else "") + _period_label(value),
+                    callback_data=f"dgperiod:{value}",
+                )
+                for value in DIGEST_PERIODS[3:]
+            ],
+        ]
+        time_rows = [
+            [InlineKeyboardButton(text=value, callback_data=f"dgtime:{value}") for value in ("08:00", "12:00")],
+            [InlineKeyboardButton(text=value, callback_data=f"dgtime:{value}") for value in ("18:00", "21:00")],
+        ]
+        rows = [
+            [InlineKeyboardButton(text="🔕 Выключить" if enabled else "🔔 Включить", callback_data="dgtoggle")],
+            [InlineKeyboardButton(text="📝 Прислать сводку сейчас", callback_data="dgnow")],
+            *period_rows,
+            *time_rows,
+            [InlineKeyboardButton(text="✏️ Ввести точное время", callback_data="dgcustom")],
+            [InlineKeyboardButton(text="⌂ Главное меню", callback_data="menu")],
+        ]
+        return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+    async def _show_digest_settings(self, query: CallbackQuery) -> None:
+        await self.database.set_app_state("digest_time_input", "0")
+        text, keyboard = await self._digest_payload()
+        await self._edit(query, text, keyboard)
 
     async def _show_category_editor(self, query: CallbackQuery, message_id: int) -> None:
         rows = []

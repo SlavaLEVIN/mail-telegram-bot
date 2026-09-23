@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import random
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from aiogram import Bot
@@ -15,17 +16,26 @@ from mailbot.database import Database
 from mailbot.mail_client import ImapClient
 from mailbot.models import Account
 from mailbot.presentation import notification
+from mailbot.summarizer import SummaryService
 
 
 LOGGER = logging.getLogger(__name__)
 
 
 class MailMonitor:
-    def __init__(self, settings: Settings, database: Database, bot: Bot, classifier: Classifier):
+    def __init__(
+        self,
+        settings: Settings,
+        database: Database,
+        bot: Bot,
+        classifier: Classifier,
+        summarizer: SummaryService,
+    ):
         self.settings = settings
         self.database = database
         self.bot = bot
         self.classifier = classifier
+        self.summarizer = summarizer
         self.semaphore = asyncio.Semaphore(settings.poll_concurrency)
 
     async def run_account(self, account: Account, initial_delay: float) -> None:
@@ -56,6 +66,8 @@ class MailMonitor:
             if is_initial and message.received_at < cutoff:
                 continue
             classification = await self.classifier.classify(message)
+            summary = await self.summarizer.summarize(message, classification)
+            classification = replace(classification, summary=summary)
             inserted = await self.database.add_message(message, classification)
             already_notified = await self.database.is_notified(account.id, uidvalidity, message.uid)
             should_notify = (
@@ -82,18 +94,22 @@ class MailMonitor:
 async def scheduled_digest(settings: Settings, database: Database, bot: Bot) -> None:
     handlers = BotHandlers(settings, database, [])
     while True:
-        now = datetime.now(settings.timezone)
-        date_key = now.date().isoformat()
-        last_sent = await database.get_app_state("last_digest_date")
-        scheduled = now.replace(
-            hour=settings.digest_time.hour,
-            minute=settings.digest_time.minute,
-            second=0,
-            microsecond=0,
-        )
-        if settings.allowed_user_id > 0 and now >= scheduled and last_sent != date_key:
-            await handlers.send_digest(bot, settings.allowed_user_id, 24)
-            await database.set_app_state("last_digest_date", date_key)
+        try:
+            now = datetime.now(settings.timezone)
+            enabled = (await database.get_app_state("digest_enabled") or "1") == "1"
+            hours = int(await database.get_app_state("digest_hours") or "24")
+            clock = await database.get_app_state("digest_time") or settings.digest_time.strftime("%H:%M")
+            hour, minute = (int(part) for part in clock.split(":"))
+            date_key = now.date().isoformat()
+            last_sent = await database.get_app_state("last_digest_date")
+            is_scheduled_minute = now.hour == hour and now.minute == minute
+            if enabled and settings.allowed_user_id > 0 and is_scheduled_minute and last_sent != date_key:
+                await handlers.send_digest(bot, settings.allowed_user_id, hours)
+                await database.set_app_state("last_digest_date", date_key)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOGGER.exception("Ошибка автоматической сводки")
         await asyncio.sleep(30)
 
 
@@ -118,7 +134,16 @@ async def run() -> None:
         RuleClassifier(settings.important_senders, settings.ignored_senders),
         AiClassifier(settings.openai_api_key, settings.openai_model),
     )
-    monitor = MailMonitor(settings, database, bot, classifier)
+    summarizer = SummaryService(
+        mode=settings.summary_mode,
+        api_key=settings.bazaarlink_api_key,
+        base_url=settings.bazaarlink_base_url,
+        model=settings.bazaarlink_model,
+        timeout_seconds=settings.ai_timeout_seconds,
+        max_email_chars=settings.ai_max_email_chars,
+        proxy_url=settings.telegram_proxy_url,
+    )
+    monitor = MailMonitor(settings, database, bot, classifier, summarizer)
 
     tasks = [
         asyncio.create_task(monitor.run_account(account, index * 2.0), name=f"mail:{account.id}")
@@ -132,5 +157,6 @@ async def run() -> None:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        await summarizer.close()
         await database.close()
         await bot.session.close()

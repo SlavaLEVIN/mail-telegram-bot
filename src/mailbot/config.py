@@ -44,6 +44,12 @@ class Settings:
     first_sync_hours: int
     importance_threshold: int
     digest_time: time
+    summary_mode: str
+    bazaarlink_api_key: str | None
+    bazaarlink_base_url: str
+    bazaarlink_model: str
+    ai_timeout_seconds: int
+    ai_max_email_chars: int
     openai_api_key: str | None
     openai_model: str
     important_senders: tuple[str, ...]
@@ -61,6 +67,10 @@ class Settings:
         except Exception as exc:
             raise ValueError(f"Неизвестный часовой пояс: {timezone_name}") from exc
 
+        summary_mode = os.getenv("SUMMARY_MODE", "extractive").strip().casefold()
+        if summary_mode not in {"extractive", "bazaarlink"}:
+            raise ValueError("SUMMARY_MODE должен быть extractive или bazaarlink")
+
         return cls(
             telegram_token=token,
             allowed_user_id=_integer("ALLOWED_TELEGRAM_USER_ID", 0),
@@ -73,6 +83,12 @@ class Settings:
             first_sync_hours=_integer("FIRST_SYNC_HOURS", 24, 1),
             importance_threshold=_integer("IMPORTANCE_THRESHOLD", 70, 1),
             digest_time=_parse_time(os.getenv("DIGEST_TIME", "21:00")),
+            summary_mode=summary_mode,
+            bazaarlink_api_key=os.getenv("BAZAARLINK_API_KEY") or None,
+            bazaarlink_base_url=os.getenv("BAZAARLINK_BASE_URL", "https://api.bazaarlink.ai/v1"),
+            bazaarlink_model=os.getenv("BAZAARLINK_MODEL", "auto:free"),
+            ai_timeout_seconds=_integer("AI_TIMEOUT_SECONDS", 30, 5),
+            ai_max_email_chars=_integer("AI_MAX_EMAIL_CHARS", 8_000, 500),
             openai_api_key=os.getenv("OPENAI_API_KEY") or None,
             openai_model=os.getenv("OPENAI_MODEL", "gpt-5-mini"),
             important_senders=_csv("IMPORTANT_SENDERS"),
