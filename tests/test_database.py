@@ -42,7 +42,14 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         await self.database.mark_notified("gmail-01", "42", 7)
         self.assertTrue(await self.database.is_notified("gmail-01", "42", 7))
 
+        message_id = await self.database.get_message_id("gmail-01", "42", 7)
+        self.assertIsNotNone(message_id)
+        await self.database.set_category(message_id, "work")
+        await self.database.set_importance(message_id, 90)
+        stored = await self.database.get_message(message_id)
+        self.assertEqual(stored.category, "work")
+        self.assertEqual(stored.importance, 90)
+
 
 if __name__ == "__main__":
     unittest.main()
-

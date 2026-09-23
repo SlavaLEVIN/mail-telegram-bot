@@ -42,6 +42,7 @@ class Classification:
 
 @dataclass(frozen=True, slots=True)
 class StoredMessage:
+    id: int
     account_id: str
     account_email: str
     sender: str
@@ -50,4 +51,3 @@ class StoredMessage:
     category: str
     importance: int
     summary: str
-

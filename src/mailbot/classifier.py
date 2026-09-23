@@ -14,12 +14,24 @@ SECRET_LINE_PATTERN = re.compile(
 REPLY_MARKERS = ("\nFrom:", "\nОт:", "\n-----Original Message-----", "\n> ")
 
 CODE_WORDS = ("код подтверждения", "одноразовый код", "verification code", "security code", "otp")
-SECURITY_WORDS = ("новый вход", "попытка входа", "смена пароля", "безопасност", "suspicious", "security alert")
-WORK_WORDS = ("стажиров", "ваканси", "собеседован", "интервью", "резюме", "job offer", "internship", "recruiter")
+SECURITY_WORDS = (
+    "новый вход", "попытка входа", "смена пароля", "безопасност", "suspicious",
+    "security alert", "oauth application", "added to your account", "new sign-in",
+    "login attempt", "two-factor", "2fa",
+)
+WORK_WORDS = (
+    "стажиров", "ваканси", "собеседован", "интервью", "резюме", "отбор",
+    "job offer", "internship", "recruiter", "bootcamp", "career",
+)
 STUDY_WORDS = ("мгту", "преподавател", "кафедр", "дедлайн", "зачет", "экзамен", "лабораторн", "курсов")
+DEADLINE_WORDS = ("дедлайн", "срок сдачи", "сдать до", "не позднее", "due date", "deadline")
+EVENT_WORDS = ("встреч", "созвон", "вебинар", "мероприят", "конференц", "совещан", "meet", "webinar")
 NEWSLETTER_WORDS = ("unsubscribe", "отписаться", "рассылка", "акция", "скидка", "промокод", "sale")
 
-CATEGORIES = {"code", "security", "work", "study", "personal", "finance", "newsletter", "other"}
+CATEGORIES = {
+    "code", "security", "work", "study", "deadline", "event", "personal",
+    "finance", "newsletter", "other",
+}
 
 
 def sanitize_for_ai(text: str) -> str:
@@ -48,15 +60,18 @@ class RuleClassifier:
         if any(word in text for word in SECURITY_WORDS):
             return Classification("security", 95, "Уведомление о безопасности аккаунта.", "rules")
 
-        has_list_header = bool(message.headers.get("list-unsubscribe"))
-        if has_list_header or any(word in text for word in NEWSLETTER_WORDS):
-            return Classification("newsletter", 10, "Похоже на рассылку или рекламное письмо.", "rules")
-
-        if any(word in text for word in WORK_WORDS):
+        if any(word in text for word in DEADLINE_WORDS):
+            score, category = 88, "deadline"
+        elif any(word in text for word in EVENT_WORDS):
+            score, category = 78, "event"
+        elif any(word in text for word in WORK_WORDS):
             score, category = 82, "work"
         elif any(word in text for word in STUDY_WORDS):
             score, category = 80, "study"
         else:
+            has_list_header = bool(message.headers.get("list-unsubscribe"))
+            if has_list_header or any(word in text for word in NEWSLETTER_WORDS):
+                return Classification("newsletter", 10, "Похоже на рассылку или рекламное письмо.", "rules")
             score, category = 45, "other"
 
         if any(value in sender for value in self.important_senders):

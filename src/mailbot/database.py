@@ -142,34 +142,100 @@ class Database:
         row = await cursor.fetchone()
         return bool(row and row["notified"])
 
-    async def recent_messages(self, since_iso: str, limit: int = 100) -> list[StoredMessage]:
+    async def get_message_id(self, account_id: str, uidvalidity: str, uid: int) -> int | None:
         cursor = await self.connection.execute(
-            """
-            SELECT account_id, account_email, sender, subject, received_at,
-                   category, importance, summary
-            FROM messages
-            WHERE received_at >= ?
-            ORDER BY importance DESC, received_at DESC
-            LIMIT ?
-            """,
-            (since_iso, limit),
+            "SELECT rowid AS id FROM messages WHERE account_id = ? AND uidvalidity = ? AND uid = ?",
+            (account_id, uidvalidity, uid),
         )
-        rows = await cursor.fetchall()
+        row = await cursor.fetchone()
+        return int(row["id"]) if row else None
+
+    @staticmethod
+    def _stored_message(row: aiosqlite.Row) -> StoredMessage:
         from datetime import datetime
 
-        return [
-            StoredMessage(
-                account_id=row["account_id"],
-                account_email=row["account_email"],
-                sender=row["sender"],
-                subject=row["subject"],
-                received_at=datetime.fromisoformat(row["received_at"]),
-                category=row["category"],
-                importance=row["importance"],
-                summary=row["summary"],
-            )
-            for row in rows
-        ]
+        def clean(value: str) -> str:
+            return " ".join(value.replace("\xa0", " ").split())
+
+        return StoredMessage(
+            id=row["id"],
+            account_id=row["account_id"],
+            account_email=row["account_email"],
+            sender=clean(row["sender"]),
+            subject=clean(row["subject"]),
+            received_at=datetime.fromisoformat(row["received_at"]),
+            category=row["category"],
+            importance=row["importance"],
+            summary=clean(row["summary"]),
+        )
+
+    async def list_messages(
+        self,
+        since_iso: str,
+        limit: int = 6,
+        offset: int = 0,
+        category: str | None = None,
+        minimum_importance: int | None = None,
+    ) -> tuple[list[StoredMessage], int]:
+        filters = ["received_at >= ?"]
+        parameters: list[object] = [since_iso]
+        if category:
+            filters.append("category = ?")
+            parameters.append(category)
+        if minimum_importance is not None:
+            filters.append("importance >= ?")
+            parameters.append(minimum_importance)
+        where = " AND ".join(filters)
+
+        count_cursor = await self.connection.execute(
+            f"SELECT COUNT(*) AS total FROM messages WHERE {where}",
+            parameters,
+        )
+        count_row = await count_cursor.fetchone()
+
+        cursor = await self.connection.execute(
+            f"""
+            SELECT rowid AS id, account_id, account_email, sender, subject,
+                   received_at, category, importance, summary
+            FROM messages
+            WHERE {where}
+            ORDER BY importance DESC, received_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            [*parameters, limit, offset],
+        )
+        rows = await cursor.fetchall()
+        return [self._stored_message(row) for row in rows], int(count_row["total"])
+
+    async def recent_messages(self, since_iso: str, limit: int = 100) -> list[StoredMessage]:
+        messages, _ = await self.list_messages(since_iso, limit=limit)
+        return messages
+
+    async def get_message(self, message_id: int) -> StoredMessage | None:
+        cursor = await self.connection.execute(
+            """
+            SELECT rowid AS id, account_id, account_email, sender, subject,
+                   received_at, category, importance, summary
+            FROM messages WHERE rowid = ?
+            """,
+            (message_id,),
+        )
+        row = await cursor.fetchone()
+        return self._stored_message(row) if row else None
+
+    async def set_category(self, message_id: int, category: str) -> None:
+        await self.connection.execute(
+            "UPDATE messages SET category = ?, classifier_source = 'user' WHERE rowid = ?",
+            (category, message_id),
+        )
+        await self.connection.commit()
+
+    async def set_importance(self, message_id: int, importance: int) -> None:
+        await self.connection.execute(
+            "UPDATE messages SET importance = ?, classifier_source = 'user' WHERE rowid = ?",
+            (max(0, min(100, importance)), message_id),
+        )
+        await self.connection.commit()
 
     async def sync_status(self) -> list[dict[str, object]]:
         cursor = await self.connection.execute(

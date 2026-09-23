@@ -9,6 +9,8 @@ CATEGORY_LABELS = {
     "security": "🚨 Безопасность",
     "work": "💼 Работа",
     "study": "🎓 Учёба",
+    "deadline": "⏳ Дедлайн",
+    "event": "📅 Встреча",
     "personal": "👤 Личное",
     "finance": "💳 Финансы",
     "newsletter": "📰 Рассылка",
@@ -26,6 +28,23 @@ def notification(message: MailMessage, result: Classification, local_time: datet
         f"Время: {local_time:%d.%m %H:%M}\n\n"
         f"{escape(result.summary)}"
     )
+
+
+def message_card(message: StoredMessage, timezone) -> str:
+    received = message.received_at.astimezone(timezone)
+    label = CATEGORY_LABELS.get(message.category, "✉️ Другое")
+    summary = message.summary.strip()
+    if summary.casefold() == message.subject.strip().casefold():
+        summary = ""
+    text = (
+        f"{label} · <b>{message.importance}/100</b>\n"
+        f"<b>{escape(message.subject)}</b>\n\n"
+        f"От: {escape(message.sender)}\n"
+        f"Получено: {received:%d.%m.%Y %H:%M}\n"
+    )
+    if summary:
+        text += f"\n{escape(summary)}"
+    return text
 
 
 def digest(messages: list[StoredMessage], title: str, timezone) -> list[str]:
@@ -50,4 +69,3 @@ def digest(messages: list[StoredMessage], title: str, timezone) -> list[str]:
             current += block
     chunks.append(current.rstrip())
     return chunks
-

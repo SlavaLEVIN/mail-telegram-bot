@@ -68,7 +68,7 @@ class Settings:
             accounts_file=Path(os.getenv("ACCOUNTS_FILE", "config/accounts.toml")),
             database_path=Path(os.getenv("DATABASE_PATH", "data/mailbot.sqlite3")),
             timezone=timezone,
-            poll_interval_seconds=_integer("POLL_INTERVAL_SECONDS", 180, 30),
+            poll_interval_seconds=_integer("POLL_INTERVAL_SECONDS", 60, 30),
             poll_concurrency=_integer("POLL_CONCURRENCY", 3, 1),
             first_sync_hours=_integer("FIRST_SYNC_HOURS", 24, 1),
             importance_threshold=_integer("IMPORTANCE_THRESHOLD", 70, 1),

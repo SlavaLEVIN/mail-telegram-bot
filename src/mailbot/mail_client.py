@@ -41,7 +41,8 @@ def _decode_header(value: str | None) -> str:
     if not value:
         return ""
     try:
-        return str(make_header(decode_header(value)))
+        decoded = str(make_header(decode_header(value)))
+        return re.sub(r"\s+", " ", decoded.replace("\xa0", " ")).strip()
     except (LookupError, UnicodeDecodeError):
         return value
 

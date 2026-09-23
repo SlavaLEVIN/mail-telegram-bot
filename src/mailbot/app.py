@@ -8,7 +8,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 
-from mailbot.bot import BotHandlers, build_dispatcher
+from mailbot.bot import BotHandlers, build_dispatcher, notification_keyboard
 from mailbot.classifier import AiClassifier, Classifier, RuleClassifier
 from mailbot.config import Settings, load_accounts
 from mailbot.database import Database
@@ -70,7 +70,9 @@ class MailMonitor:
                     classification,
                     message.received_at.astimezone(self.settings.timezone),
                 )
-                await self.bot.send_message(self.settings.allowed_user_id, text)
+                message_id = await self.database.get_message_id(account.id, uidvalidity, message.uid)
+                keyboard = notification_keyboard(message_id) if message_id is not None else None
+                await self.bot.send_message(self.settings.allowed_user_id, text, reply_markup=keyboard)
                 await self.database.mark_notified(account.id, uidvalidity, message.uid)
 
         await self.database.set_sync_state(account.id, uidvalidity, highest_uid)

@@ -1,24 +1,75 @@
 from datetime import UTC, datetime, timedelta
 from html import escape
+from math import ceil
 
 from aiogram import Bot, Dispatcher, F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from mailbot.config import Settings
 from mailbot.database import Database
-from mailbot.models import Account
-from mailbot.presentation import digest
+from mailbot.models import Account, StoredMessage
+from mailbot.presentation import CATEGORY_LABELS, message_card
 
 
-def digest_keyboard() -> InlineKeyboardMarkup:
+PAGE_SIZE = 6
+CATEGORY_BUTTONS = (
+    ("💼 Работа", "work"),
+    ("🎓 Учёба", "study"),
+    ("⏳ Дедлайн", "deadline"),
+    ("📅 Встреча", "event"),
+    ("👤 Личное", "personal"),
+    ("🚨 Безопасность", "security"),
+    ("🔐 Код", "code"),
+    ("💳 Финансы", "finance"),
+    ("📰 Рассылка", "newsletter"),
+    ("✉️ Другое", "other"),
+)
+
+
+def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📬 Письма за 24 часа", callback_data="digest:24")],
+            [InlineKeyboardButton(text="📬 Письма за 24 часа", callback_data="list:all:24:0")],
             [
-                InlineKeyboardButton(text="6 часов", callback_data="digest:6"),
-                InlineKeyboardButton(text="7 дней", callback_data="digest:168"),
+                InlineKeyboardButton(text="🔴 Важные", callback_data="list:important:168:0"),
+                InlineKeyboardButton(text="🗂 Категории", callback_data="categories"),
             ],
+            [
+                InlineKeyboardButton(text="📊 Статус", callback_data="status"),
+                InlineKeyboardButton(text="📮 Аккаунт", callback_data="accounts"),
+            ],
+        ]
+    )
+
+
+def notification_keyboard(message_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Открыть письмо", callback_data=f"open:{message_id}:important:168:0")],
+            [InlineKeyboardButton(text="📬 К письмам", callback_data="list:all:24:0")],
+        ]
+    )
+
+
+def _short_subject(message: StoredMessage) -> str:
+    label = CATEGORY_LABELS.get(message.category, "✉️").split(" ", 1)[0]
+    subject = " ".join(message.subject.split())
+    if len(subject) > 38:
+        subject = subject[:35] + "…"
+    return f"{label} {message.importance} · {subject}"
+
+
+def _details_keyboard(message_id: int, scope: str, hours: int, page: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🗂 Категория", callback_data=f"catmenu:{message_id}"),
+                InlineKeyboardButton(text="⭐ Важность", callback_data=f"impmenu:{message_id}"),
+            ],
+            [InlineKeyboardButton(text="← Назад к письмам", callback_data=f"list:{scope}:{hours}:{page}")],
+            [InlineKeyboardButton(text="⌂ Главное меню", callback_data="menu")],
         ]
     )
 
@@ -32,9 +83,9 @@ class BotHandlers:
         self.router.message.register(self.whoami, Command("whoami"))
         self.router.message.register(self.start, Command("start", "help"))
         self.router.message.register(self.digest_command, Command("digest"))
-        self.router.message.register(self.status, Command("status"))
+        self.router.message.register(self.status_command, Command("status"))
         self.router.message.register(self.accounts_command, Command("accounts"))
-        self.router.callback_query.register(self.digest_callback, F.data.startswith("digest:"))
+        self.router.callback_query.register(self.callback, F.data)
 
     def authorized(self, user_id: int | None) -> bool:
         return self.settings.allowed_user_id > 0 and user_id == self.settings.allowed_user_id
@@ -48,37 +99,152 @@ class BotHandlers:
             await message.answer("Доступ закрыт. Используйте /whoami и укажите ID в настройках бота.")
             return
         await message.answer(
-            "Бот следит за почтой и присылает важные письма.\n\n"
-            "/digest — сводка за сутки\n"
-            "/status — состояние синхронизации\n"
-            "/accounts — подключённые ящики",
-            reply_markup=digest_keyboard(),
+            "<b>Почтовый помощник</b>\n\nВыберите раздел. Следующие экраны будут открываться в этом сообщении.",
+            reply_markup=main_menu(),
         )
 
     async def digest_command(self, message: Message) -> None:
-        if not self.authorized(message.from_user.id if message.from_user else None):
-            return
-        await self.send_digest(message.bot, message.chat.id, 24)
+        if self.authorized(message.from_user.id if message.from_user else None):
+            await self.send_digest(message.bot, message.chat.id, 24)
 
-    async def digest_callback(self, query: CallbackQuery) -> None:
+    async def status_command(self, message: Message) -> None:
+        if self.authorized(message.from_user.id if message.from_user else None):
+            await message.answer(await self._status_text(), reply_markup=self._back_menu())
+
+    async def accounts_command(self, message: Message) -> None:
+        if self.authorized(message.from_user.id if message.from_user else None):
+            await message.answer(self._accounts_text(), reply_markup=self._back_menu())
+
+    async def callback(self, query: CallbackQuery) -> None:
         if not self.authorized(query.from_user.id):
             await query.answer("Доступ закрыт", show_alert=True)
             return
         await query.answer()
-        hours = int((query.data or "digest:24").split(":", 1)[1])
-        if query.message:
-            await self.send_digest(query.bot, query.message.chat.id, hours)
+        data = query.data or "menu"
+
+        if data == "menu":
+            await self._edit(query, "<b>Почтовый помощник</b>\n\nВыберите раздел.", main_menu())
+        elif data == "noop":
+            return
+        elif data == "categories":
+            await self._show_categories(query)
+        elif data == "status":
+            await self._edit(query, await self._status_text(), self._back_menu())
+        elif data == "accounts":
+            await self._edit(query, self._accounts_text(), self._back_menu())
+        elif data.startswith("list:"):
+            _, scope, hours, page = data.split(":")
+            await self._show_list(query, scope, int(hours), int(page))
+        elif data.startswith("open:"):
+            _, message_id, scope, hours, page = data.split(":")
+            await self._show_message(query, int(message_id), scope, int(hours), int(page))
+        elif data.startswith("catmenu:"):
+            await self._show_category_editor(query, int(data.split(":")[1]))
+        elif data.startswith("impmenu:"):
+            await self._show_importance_editor(query, int(data.split(":")[1]))
+        elif data.startswith("setcat:"):
+            _, message_id, category = data.split(":")
+            await self.database.set_category(int(message_id), category)
+            await self._show_message(query, int(message_id), "all", 24, 0, "Категория сохранена")
+        elif data.startswith("setimp:"):
+            _, message_id, importance = data.split(":")
+            await self.database.set_importance(int(message_id), int(importance))
+            await self._show_message(query, int(message_id), "all", 24, 0, "Важность сохранена")
 
     async def send_digest(self, bot: Bot, chat_id: int, hours: int) -> None:
-        since = datetime.now(UTC) - timedelta(hours=hours)
-        messages = await self.database.recent_messages(since.isoformat())
-        title = "Сводка за 7 дней" if hours == 168 else f"Сводка за {hours} ч."
-        for chunk in digest(messages, title, self.settings.timezone):
-            await bot.send_message(chat_id, chunk)
+        text, keyboard = await self._list_payload("all", hours, 0)
+        await bot.send_message(chat_id, text, reply_markup=keyboard)
 
-    async def status(self, message: Message) -> None:
-        if not self.authorized(message.from_user.id if message.from_user else None):
+    async def _show_list(self, query: CallbackQuery, scope: str, hours: int, page: int) -> None:
+        text, keyboard = await self._list_payload(scope, hours, page)
+        await self._edit(query, text, keyboard)
+
+    async def _list_payload(self, scope: str, hours: int, page: int) -> tuple[str, InlineKeyboardMarkup]:
+        since = datetime.now(UTC) - timedelta(hours=hours)
+        category = None if scope in {"all", "important"} else scope
+        minimum = self.settings.importance_threshold if scope == "important" else None
+        messages, total = await self.database.list_messages(
+            since.isoformat(),
+            limit=PAGE_SIZE,
+            offset=page * PAGE_SIZE,
+            category=category,
+            minimum_importance=minimum,
+        )
+        page_count = max(1, ceil(total / PAGE_SIZE))
+        title = "Важные письма" if scope == "important" else "Письма"
+        if category:
+            title = CATEGORY_LABELS.get(category, category)
+        period = "7 дней" if hours == 168 else f"{hours} ч."
+        text = f"<b>{escape(title)}</b> · {period}\nНайдено: {total}\n\nВыберите письмо:"
+        if not messages:
+            text += "\nПока ничего нет."
+
+        rows = [
+            [InlineKeyboardButton(text=_short_subject(item), callback_data=f"open:{item.id}:{scope}:{hours}:{page}")]
+            for item in messages
+        ]
+        navigation: list[InlineKeyboardButton] = []
+        if page > 0:
+            navigation.append(InlineKeyboardButton(text="←", callback_data=f"list:{scope}:{hours}:{page - 1}"))
+        navigation.append(InlineKeyboardButton(text=f"{page + 1}/{page_count}", callback_data="noop"))
+        if page + 1 < page_count:
+            navigation.append(InlineKeyboardButton(text="→", callback_data=f"list:{scope}:{hours}:{page + 1}"))
+        rows.append(navigation)
+        rows.append([InlineKeyboardButton(text="⌂ Главное меню", callback_data="menu")])
+        return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+    async def _show_message(
+        self,
+        query: CallbackQuery,
+        message_id: int,
+        scope: str,
+        hours: int,
+        page: int,
+        notice: str | None = None,
+    ) -> None:
+        item = await self.database.get_message(message_id)
+        if not item:
+            await self._edit(query, "Письмо не найдено.", self._back_menu())
             return
+        text = message_card(item, self.settings.timezone)
+        if notice:
+            text = f"✅ {escape(notice)}\n\n{text}"
+        await self._edit(query, text, _details_keyboard(message_id, scope, hours, page))
+
+    async def _show_categories(self, query: CallbackQuery) -> None:
+        rows = []
+        for index in range(0, len(CATEGORY_BUTTONS), 2):
+            rows.append([
+                InlineKeyboardButton(text=label, callback_data=f"list:{category}:168:0")
+                for label, category in CATEGORY_BUTTONS[index:index + 2]
+            ])
+        rows.append([InlineKeyboardButton(text="⌂ Главное меню", callback_data="menu")])
+        await self._edit(query, "<b>Категории</b>\n\nВыберите категорию писем:", InlineKeyboardMarkup(inline_keyboard=rows))
+
+    async def _show_category_editor(self, query: CallbackQuery, message_id: int) -> None:
+        rows = []
+        for index in range(0, len(CATEGORY_BUTTONS), 2):
+            rows.append([
+                InlineKeyboardButton(text=label, callback_data=f"setcat:{message_id}:{category}")
+                for label, category in CATEGORY_BUTTONS[index:index + 2]
+            ])
+        rows.append([InlineKeyboardButton(text="← К письму", callback_data=f"open:{message_id}:all:24:0")])
+        await self._edit(query, "<b>Новая категория</b>", InlineKeyboardMarkup(inline_keyboard=rows))
+
+    async def _show_importance_editor(self, query: CallbackQuery, message_id: int) -> None:
+        values = (10, 30, 50, 70, 90, 100)
+        rows = [
+            [InlineKeyboardButton(text=str(value), callback_data=f"setimp:{message_id}:{value}") for value in values[:3]],
+            [InlineKeyboardButton(text=str(value), callback_data=f"setimp:{message_id}:{value}") for value in values[3:]],
+            [InlineKeyboardButton(text="← К письму", callback_data=f"open:{message_id}:all:24:0")],
+        ]
+        await self._edit(
+            query,
+            "<b>Важность письма</b>\n\n10 — шум, 50 — обычное, 70+ — важное.",
+            InlineKeyboardMarkup(inline_keyboard=rows),
+        )
+
+    async def _status_text(self) -> str:
         rows = await self.database.sync_status()
         states = {row["account_id"]: row for row in rows}
         lines = ["<b>Состояние синхронизации</b>"]
@@ -91,18 +257,29 @@ class BotHandlers:
             else:
                 marker, details = "🟢", f"обновлено {escape(str(state['updated_at']))} UTC"
             lines.append(f"{marker} <code>{escape(account.email)}</code> — {details}")
-        await message.answer("\n".join(lines))
+        return "\n".join(lines)
 
-    async def accounts_command(self, message: Message) -> None:
-        if not self.authorized(message.from_user.id if message.from_user else None):
-            return
+    def _accounts_text(self) -> str:
         lines = [f"<b>Подключено ящиков: {len(self.accounts)}</b>"]
-        lines.extend(f"• <code>{escape(account.email)}</code> ({account.provider})" for account in self.accounts)
-        await message.answer("\n".join(lines))
+        lines.extend(f"• <code>{escape(account.email)}</code>" for account in self.accounts)
+        return "\n".join(lines)
+
+    @staticmethod
+    def _back_menu() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⌂ Главное меню", callback_data="menu")]])
+
+    @staticmethod
+    async def _edit(query: CallbackQuery, text: str, keyboard: InlineKeyboardMarkup) -> None:
+        if not query.message:
+            return
+        try:
+            await query.message.edit_text(text, reply_markup=keyboard)
+        except TelegramBadRequest as exc:
+            if "message is not modified" not in str(exc):
+                raise
 
 
 def build_dispatcher(settings: Settings, database: Database, accounts: list[Account]) -> Dispatcher:
     dispatcher = Dispatcher()
     dispatcher.include_router(BotHandlers(settings, database, accounts).router)
     return dispatcher
-

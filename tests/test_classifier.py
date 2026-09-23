@@ -52,10 +52,32 @@ class RuleClassifierTests(unittest.TestCase):
 
     def test_study_message_is_important(self) -> None:
         result = self.classifier.classify(message("Лабораторная работа", "Дедлайн перенесён на пятницу"))
-        self.assertEqual(result.category, "study")
+        self.assertEqual(result.category, "deadline")
+        self.assertGreaterEqual(result.importance, 70)
+
+    def test_meeting_is_an_important_event(self) -> None:
+        result = self.classifier.classify(message("Встреча завтра в 17:00", "Встреча завтра в 17:00 в Москве"))
+        self.assertEqual(result.category, "event")
+        self.assertGreaterEqual(result.importance, 70)
+
+    def test_github_oauth_change_is_security(self) -> None:
+        result = self.classifier.classify(
+            message("[GitHub] A third-party OAuth application has been added to your account", "Review access")
+        )
+        self.assertEqual(result.category, "security")
+        self.assertGreaterEqual(result.importance, 90)
+
+    def test_work_content_beats_newsletter_header(self) -> None:
+        result = self.classifier.classify(
+            message(
+                "Data Science Bootcamp / Результаты отбора",
+                "Результаты отбора на стажировку",
+                {"list-unsubscribe": "<url>"},
+            )
+        )
+        self.assertEqual(result.category, "work")
         self.assertGreaterEqual(result.importance, 70)
 
 
 if __name__ == "__main__":
     unittest.main()
-
