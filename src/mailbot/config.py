@@ -35,6 +35,7 @@ def _csv(name: str) -> tuple[str, ...]:
 class Settings:
     telegram_token: str
     allowed_user_id: int
+    telegram_proxy_url: str | None
     accounts_file: Path
     database_path: Path
     timezone: ZoneInfo
@@ -63,6 +64,7 @@ class Settings:
         return cls(
             telegram_token=token,
             allowed_user_id=_integer("ALLOWED_TELEGRAM_USER_ID", 0),
+            telegram_proxy_url=os.getenv("TELEGRAM_PROXY_URL") or None,
             accounts_file=Path(os.getenv("ACCOUNTS_FILE", "config/accounts.toml")),
             database_path=Path(os.getenv("DATABASE_PATH", "data/mailbot.sqlite3")),
             timezone=timezone,
@@ -110,4 +112,3 @@ def load_accounts(path: Path) -> list[Account]:
     if not accounts:
         raise ValueError("В accounts.toml нет ни одного аккаунта")
     return accounts
-

@@ -3,9 +3,10 @@ services:
     build: .
     container_name: mail-telegram-bot
     restart: unless-stopped
+    # Нужен для доступа из контейнера к локальному SOCKS5 Hiddify на 127.0.0.1.
+    network_mode: host
     env_file:
       - .env
     volumes:
       - ./config/accounts.toml:/app/config/accounts.toml:ro
       - ./data:/app/data
-

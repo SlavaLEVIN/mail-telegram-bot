@@ -70,6 +70,23 @@ docker compose up -d
 
 После этого остальные пользователи не смогут управлять ботом.
 
+### Telegram через Hiddify на Linux Mint
+
+Если прямой доступ к Bot API ограничен, бот может использовать локальный SOCKS5 Hiddify. В `.env` укажите:
+
+```dotenv
+TELEGRAM_PROXY_URL=socks5://127.0.0.1:12334
+```
+
+`docker-compose.yml` использует `network_mode: host`, поэтому контейнер видит локальный порт хоста. Убедитесь, что Hiddify запущен:
+
+```bash
+ss -ltnp | grep 12334
+curl -4 -x socks5h://127.0.0.1:12334 -X POST -o /dev/null -w 'HTTP %{http_code}\n' --connect-timeout 10 --max-time 20 'https://api.telegram.org/bot0:invalid/getMe'
+```
+
+Ответ `HTTP 401` подтверждает, что маршрут через прокси работает. IMAP-соединения с Gmail и Mail.ru через этот параметр не проксируются.
+
 ## 5. AI-классификация
 
 AI необязателен. Без него работают локальные правила для кодов, безопасности, работы, учёбы и рассылок.

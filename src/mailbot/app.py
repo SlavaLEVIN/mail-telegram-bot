@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 
 from mailbot.bot import BotHandlers, build_dispatcher
@@ -104,7 +105,12 @@ async def run() -> None:
     database = Database(settings.database_path)
     await database.open()
 
-    bot = Bot(settings.telegram_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    session = AiohttpSession(proxy=settings.telegram_proxy_url) if settings.telegram_proxy_url else None
+    bot = Bot(
+        settings.telegram_token,
+        session=session,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
     dispatcher = build_dispatcher(settings, database, accounts)
     classifier = Classifier(
         RuleClassifier(settings.important_senders, settings.ignored_senders),
