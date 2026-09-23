@@ -1,0 +1,2 @@
+"""Personal email notification bot."""
+

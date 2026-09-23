@@ -1,0 +1,9 @@
+.env
+config/accounts.toml
+data/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.idea/
+.vscode/
+

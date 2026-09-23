@@ -1,0 +1,11 @@
+services:
+  mail-bot:
+    build: .
+    container_name: mail-telegram-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./config/accounts.toml:/app/config/accounts.toml:ro
+      - ./data:/app/data
+
