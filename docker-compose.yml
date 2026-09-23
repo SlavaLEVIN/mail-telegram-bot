@@ -3,6 +3,9 @@ services:
     build: .
     container_name: mail-telegram-bot
     restart: unless-stopped
+    # Совпадает с первым обычным пользователем Linux Mint и позволяет читать
+    # accounts.toml с правами 600, а также записывать SQLite в ./data.
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     # Нужен для доступа из контейнера к локальному SOCKS5 Hiddify на 127.0.0.1.
     network_mode: host
     env_file:

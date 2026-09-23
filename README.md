@@ -33,7 +33,11 @@
 cp .env.example .env
 cp config/accounts.toml.example config/accounts.toml
 chmod 600 .env config/accounts.toml
+mkdir -p data
+sudo chown -R "$(id -u):$(id -g)" data
 ```
+
+Значения `HOST_UID` и `HOST_GID` в `.env` должны совпадать с выводом `id -u` и `id -g`. Для первого пользователя Linux Mint это обычно `1000:1000`.
 
 Замените адреса в `config/accounts.toml` на настоящие.
 
